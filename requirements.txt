@@ -5,3 +5,4 @@ presidio-anonymizer
 httpx
 python-dotenv
 pydantic-settings
+streamlit
