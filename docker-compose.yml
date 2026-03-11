@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  ironlayer:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - PROVIDER=openrouter
+      - API_KEY=${API_KEY} # Pulls from .env file
+    volumes:
+      - ./policy.yaml:/app/policy.yaml # Mount policy for easy edits
