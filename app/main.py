@@ -1,23 +1,37 @@
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from app.proxy import forward_request, process_response
 from app.store import SessionStore
 import asyncio
 
 app = FastAPI(
     title="IronLayer API",
-    description="The Security Layer for AI. Sanitizes PII and Secrets before reaching external models.",
+    description="The Security Layer for AI. Redacts PII, enforces policies, and manages model routing.",
     version="1.0.0"
+)
+
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.on_event("startup")
 async def startup_event():
+    # Cleanup task for expired keys
     async def cleanup_task():
         while True:
             SessionStore.cleanup()
             await asyncio.sleep(60)
     asyncio.create_task(cleanup_task())
 
-# Add operation_id to suppress the warning
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "version": "1.0.0"}
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"], operation_id="catch_all")
 async def catch_all(request: Request, path: str):
     # 1. Read Request

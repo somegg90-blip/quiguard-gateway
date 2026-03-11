@@ -6,6 +6,8 @@ httpx
 python-dotenv
 pydantic-settings
 streamlit
+tiktoken
+pyyaml
 
 # --- CRITICAL FIXES ---
 # Pin Spacy to a stable version that works with Pydantic v2

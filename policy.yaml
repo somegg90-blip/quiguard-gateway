@@ -1,0 +1,173 @@
+# policy.yaml
+# IronLayer Enterprise Configuration
+# Version: 2.0
+# ---
+# Documentation: This file defines the security posture of your AI Gateway.
+# Changes here take effect immediately without restarting the server (hot reload capable).
+
+# ==========================================
+# 1. GLOBAL SETTINGS
+# ==========================================
+settings:
+  language: "en"
+  # Minimum confidence score (0.0 - 1.0) to trigger a redaction.
+  # 0.5 = Aggressive (catches more, risk of false positives)
+  # 0.8 = Conservative (only high-confidence matches)
+  confidence_threshold: 0.6
+  
+  # Action to take when PII is found:
+  # "redact" -> <EMAIL_ADDRESS>
+  # "mask"   -> ****@gmail.com
+  # "fake"   -> alex.smith@example.com (uses Faker library)
+  default_action: "redact"
+
+# ==========================================
+# 2. PII DETECTION (The "Wall")
+# ==========================================
+# Enable/Disable specific entity categories.
+# These are predefined in Microsoft Presidio.
+pii:
+  enabled: true
+  
+  # --- PERSONAL IDENTIFIERS ---
+  personal:
+    - PERSON            # Names of people
+    - EMAIL_ADDRESS
+    - PHONE_NUMBER
+    - LOCATION          # Physical addresses
+    - DATE_TIME         # Birthdates, schedules
+
+  # --- FINANCIAL & BANKING ---
+  financial:
+    - CREDIT_CARD
+    - IBAN_CODE         # International Bank Accounts
+    - US_BANK_NUMBER
+    - CRYPTO            # Crypto wallet addresses
+
+  # --- GOVERNMENT & LEGAL IDs ---
+  government:
+    - US_SSN            # Social Security
+    - US_PASSPORT
+    - US_DRIVER_LICENSE
+    - US_ITIN           # Tax ID
+    - UK_NINO           # UK National Insurance
+    - SG_NRIC_FIN       # Singapore ID
+
+  # --- HEALTHCARE (HIPAA Compliance) ---
+  healthcare:
+    - MEDICAL_LICENSE
+    - US_NHS            # UK National Health Service (if supported)
+    # Add custom medical codes in the custom_patterns section below
+
+  # --- TECH & NETWORK ---
+  technical:
+    - IP_ADDRESS
+    - URL               # Often too broad, but useful for internal URLs
+    - DOMAIN_NAME
+
+# ==========================================
+# 3. INTELLECTUAL PROPERTY (Custom Secrets)
+# ==========================================
+# Define your company's specific secrets here.
+# These use Regex patterns and "Context Words" for accuracy.
+custom_patterns:
+  
+  # Example 1: Project Codenames
+  - name: "PROJECT_STARLIGHT"
+    regex: "(ProjectStarlight|Starlight-Initiative|XZ-100)"
+    score: 0.85
+    # Context words increase confidence if found near the match
+    context: ["project", "deadline", "budget", "launch", "team"]
+
+  # Example 2: Internal API Keys (Generic)
+  - name: "INTERNAL_API_KEY"
+    regex: "sk-(live|test)-[a-zA-Z0-9]{24,32}"
+    score: 0.95
+    
+  # Example 3: Employee IDs
+  - name: "EMPLOYEE_ID"
+    regex: "EMP-\\d{6}"
+    score: 0.8
+    context: ["employee", "staff", "manager", "id"]
+
+  # Example 4: Confidential Financial Documents
+  - name: "CONFIDENTIAL_DOC"
+    regex: "Conf-SAL-[0-9]{4}"
+    score: 0.9
+    context: ["salary", "payroll", "confidential"]
+
+# ==========================================
+# 4. AGENT SECURITY (The "Guardrails")
+# ==========================================
+# Security policies for autonomous AI Agents.
+agent_security:
+  
+  # A. Data Exfiltration Prevention
+  # Block prompts containing these domains (prevents sending data to competitors/public pastes)
+  blocked_domains:
+    - "competitor.com"
+    - "pastebin.com"
+    - "internal-secret.wiki"
+    - "ngrok.io"          # Block tunnels
+  
+  # B. Dangerous Action Patterns (Prompt Injection Defense)
+  # If these patterns appear in the user prompt, the request is blocked.
+  blocked_prompt_patterns:
+    - "ignore previous instructions"
+    - "disregard all security rules"
+    - "system: override"
+    - "jailbreak"
+  
+  # C. Tool/Function Call Restrictions
+  # (Useful if your Agent can execute code or SQL)
+  blocked_tool_patterns:
+    - "DROP TABLE"
+    - "DELETE FROM users"
+    - "format c:"
+    - "rm -rf /"
+    - "sudo rm"
+    - "GRANT ALL PRIVILEGES"
+
+  # D. URL Sanitization Rules
+  # Force specific domains to always be redacted, even if they are valid URLs
+  force_redact_url_patterns:
+    - "*.internal.company.com"
+    - "localhost:8000"
+    - "192.168.*.*"
+
+# ==========================================
+# 5. MODEL ROUTING (Smart Optimization)
+# ==========================================
+# Configure how IronLayer routes requests to different models.
+routing:
+  
+  # Map keywords to specific models
+  intent_mapping:
+    reasoning: 
+      keywords: ["think", "analyze", "logic", "solve", "math"]
+      model: "nvidia/nemotron-nano-12b-v2-vl:free"
+    
+    coding:
+      keywords: ["write code", "debug", "function", "python", "javascript"]
+      model: "meta-llama/llama-3.3-70b-instruct:free"
+    
+    creative:
+      keywords: ["write a story", "poem", "joke", "creative"]
+      model: "meta-llama/llama-3.3-70b-instruct:free"
+  
+  # Default fallback model if no intent is matched
+  default_model: "meta-llama/llama-3.3-70b-instruct:free"
+
+# ==========================================
+# 6. LOGGING & AUDIT
+# ==========================================
+logging:
+  # Log level for console output
+  level: "INFO" # DEBUG, INFO, WARNING, ERROR
+  
+  # Save audit trails to a file
+  audit_enabled: true
+  audit_file: "audit_log.json"
+  
+  # What to log
+  log_content: false # WARNING: Set to true only if you need to debug actual PII flows. False is safer for production.

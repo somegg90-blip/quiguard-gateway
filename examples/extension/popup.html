@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IronLayer • secure chat</title>
+  <!-- Font Awesome 6 (free) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+  <!-- Google Fonts: Playfair Display & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,600;14..32,700&family=Playfair+Display:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 400px;                /* slightly wider to accommodate settings comfortably */
+      background: #0b0a0c;
+      color: #ede7e0;
+      font-family: 'Inter', sans-serif;
+      font-weight: 300;
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 20px 18px;
+      position: relative;
+      overflow-x: hidden;
+    }
+
+    /* subtle animated grain (luxury signature) */
+    body::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(circle at 70% 20%, rgba(74, 44, 61, 0.18) 0%, transparent 55%),
+                  repeating-linear-gradient(45deg, rgba(212, 175, 55, 0.02) 0px, rgba(212, 175, 55, 0.02) 2px, transparent 2px, transparent 8px);
+      pointer-events: none;
+      z-index: 0;
+      animation: grainShift 16s infinite alternate ease-in-out;
+    }
+
+    @keyframes grainShift {
+      0% { background-position: 0% 0%; }
+      100% { background-position: 4% 5%; }
+    }
+
+    .container {
+      position: relative;
+      z-index: 2;
+    }
+
+    /* header with shield & gold */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+      border-bottom: 1px solid rgba(212, 175, 55, 0.25);
+      padding-bottom: 12px;
+    }
+
+    .header i {
+      font-size: 28px;
+      color: #d4af37;
+      filter: drop-shadow(0 0 6px rgba(212, 175, 55, 0.4));
+    }
+
+    .header h2 {
+      font-family: 'Playfair Display', serif;
+      font-weight: 600;
+      font-size: 20px;
+      letter-spacing: -0.01em;
+      background: linear-gradient(135deg, #f5e6d3 0%, #d4af37 80%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin: 0;
+    }
+
+    .badge {
+      background: rgba(212, 175, 55, 0.12);
+      border: 1px solid rgba(212, 175, 55, 0.3);
+      border-radius: 40px;
+      padding: 4px 10px;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #e0c285;
+      margin-left: auto;
+    }
+
+    /* section labels */
+    .section-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: #c9bcaf;
+      margin-bottom: 6px;
+      letter-spacing: 0.3px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .section-label i {
+      color: #d4af37;
+      font-size: 12px;
+    }
+
+    /* luxury textarea (for prompt) */
+    .luxury-textarea {
+      width: 100%;
+      background: rgba(20, 18, 22, 0.7);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(212, 175, 55, 0.25);
+      border-radius: 18px;
+      padding: 14px 16px;
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      color: #ede7e0;
+      resize: vertical;
+      min-height: 80px;
+      margin-bottom: 15px;
+      transition: 0.2s;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.5);
+      line-height: 1.5;
+    }
+
+    .luxury-textarea:focus {
+      outline: none;
+      border-color: #d4af37;
+      box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.2), 0 8px 20px black;
+    }
+
+    .luxury-textarea::placeholder {
+      color: #6a6159;
+      font-style: italic;
+      font-weight: 300;
+    }
+
+    /* response area (glass card, non-editable) */
+    .response-card {
+      background: rgba(21, 19, 22, 0.6);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(212, 175, 55, 0.2);
+      border-radius: 18px;
+      padding: 14px 16px;
+      min-height: 70px;
+      max-height: 150px;
+      overflow-y: auto;
+      font-size: 13px;
+      color: #f0e4d6;
+      margin-bottom: 18px;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.5);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .response-card:hover {
+      border-color: rgba(212, 175, 55, 0.4);
+    }
+
+    /* buttons (primary gold) */
+    .btn-primary {
+      width: 100%;
+      background: linear-gradient(145deg, #1f1b1f, #151315);
+      border: 1.5px solid #d4af37;
+      color: #d4af37;
+      font-weight: 600;
+      font-size: 14px;
+      padding: 12px 10px;
+      border-radius: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+      transition: 0.25s;
+      box-shadow: 0 6px 14px rgba(0,0,0,0.6), 0 1px 0 rgba(212, 175, 55, 0.2) inset;
+      letter-spacing: 0.3px;
+      margin-bottom: 12px;
+    }
+
+    .btn-primary i {
+      color: #d4af37;
+      font-size: 14px;
+      transition: 0.2s;
+    }
+
+    .btn-primary:hover {
+      background: #2a252a;
+      border-color: #eccd7c;
+      color: #f5e6d3;
+      box-shadow: 0 10px 22px rgba(212, 175, 55, 0.3);
+      transform: translateY(-2px);
+    }
+
+    .btn-primary:hover i {
+      color: #f5e6d3;
+    }
+
+    /* status line */
+    .status {
+      font-size: 11px;
+      color: #b9aea8;
+      margin-bottom: 15px;
+      padding-left: 8px;
+      font-style: italic;
+      letter-spacing: 0.3px;
+      min-height: 18px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status i {
+      color: #d4af37;
+      font-size: 6px;
+    }
+
+    /* settings section divider */
+    .settings-divider {
+      margin: 20px 0 12px 0;
+      border-top: 1px solid rgba(212, 175, 55, 0.2);
+      position: relative;
+    }
+    .settings-divider span {
+      position: relative;
+      top: -10px;
+      background: #0b0a0c;
+      padding: 0 12px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: #8f857b;
+      display: inline-block;
+      margin-left: 10px;
+    }
+
+    /* configuration heading */
+    .config-heading {
+      font-size: 14px;
+      font-weight: 500;
+      color: #e0d3c5;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .config-heading i {
+      color: #d4af37;
+    }
+
+    /* input field */
+    .luxury-input {
+      width: 100%;
+      background: rgba(20, 18, 22, 0.6);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(212, 175, 55, 0.25);
+      border-radius: 40px;
+      padding: 12px 16px;
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      color: #ede7e0;
+      margin-bottom: 12px;
+      transition: 0.2s;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+    }
+
+    .luxury-input:focus {
+      outline: none;
+      border-color: #d4af37;
+      box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.2);
+    }
+
+    .luxury-input::placeholder {
+      color: #6a6159;
+      font-style: italic;
+    }
+
+    /* small hint text */
+    .hint-text {
+      font-size: 10px;
+      color: #7a7168;
+      margin-top: -6px;
+      margin-bottom: 16px;
+      padding-left: 12px;
+      letter-spacing: 0.2px;
+    }
+
+    /* save button (secondary gold outline) */
+    .btn-secondary {
+      width: 100%;
+      background: transparent;
+      border: 1.5px solid #d4af37;
+      color: #e0cba0;
+      font-weight: 500;
+      font-size: 13px;
+      padding: 10px 10px;
+      border-radius: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+      transition: 0.25s;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+      margin-bottom: 6px;
+    }
+
+    .btn-secondary i {
+      color: #d4af37;
+      font-size: 13px;
+      transition: 0.2s;
+    }
+
+    .btn-secondary:hover {
+      background: rgba(212, 175, 55, 0.08);
+      border-color: #eccd7c;
+      color: #f0e4d6;
+      transform: translateY(-1px);
+      box-shadow: 0 8px 16px rgba(212, 175, 55, 0.15);
+    }
+
+    .btn-secondary:hover i {
+      color: #f5e6d3;
+    }
+
+    /* tiny footer (optional) */
+    .gold-footer {
+      margin-top: 12px;
+      text-align: right;
+      font-size: 8px;
+      color: #4f4842;
+      letter-spacing: 0.5px;
+      border-top: 1px solid rgba(212, 175, 55, 0.08);
+      padding-top: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- header with shield and title -->
+    <div class="header">
+      <i class="fas fa-shield-halos"></i>
+      <h2>IronLayer</h2>
+      <span class="badge">secure</span>
+    </div>
+
+    <!-- CHAT SECTION (matches original IDs) -->
+    <div class="section-label">
+      <i class="fas fa-pen"></i> Type your secret prompt
+    </div>
+    <textarea id="prompt" class="luxury-textarea" placeholder="e.g., My email is boss@secret.com about ProjectStarlight..."></textarea>
+
+    <button id="sendBtn" class="btn-primary">
+      <i class="fas fa-shield"></i> Sanitize & Send
+    </button>
+
+    <div class="status" id="status">
+      <i class="fas fa-circle"></i> ready
+    </div>
+
+    <div class="response-card" id="response">
+      <!-- response will appear here -->
+      <span style="color: #a99f95;">✨ sanitized output will appear here</span>
+    </div>
+
+    <!-- CONFIGURATION / SETTINGS SECTION (original elements) -->
+    <div class="settings-divider">
+      <span>⚙️ configuration</span>
+    </div>
+
+    <div class="config-heading">
+      <i class="fas fa-sliders-h"></i> Proxy settings
+    </div>
+
+    <input type="text" id="serverUrl" class="luxury-input" placeholder="IronLayer Server URL (e.g. http://localhost:8000)" value="http://localhost:8000" />
+
+    <button id="saveBtn" class="btn-secondary">
+      <i class="fas fa-save"></i> Save Settings
+    </button>
+
+    <div class="hint-text">
+      <i class="fas fa-info-circle" style="color: #d4af37; font-size: 9px;"></i> Enter the URL where IronLayer Proxy is running.
+    </div>
+
+    <!-- tiny gold footer (purely aesthetic) -->
+    <div class="gold-footer">
+      <i class="fas fa-lock" style="color: #d4af37;"></i> data scrubbed before leaving
+    </div>
+  </div>
+
+  <!-- keep original script reference (popup.js) -->
+  <script src="popup.js"></script>
+</body>
+</html>
