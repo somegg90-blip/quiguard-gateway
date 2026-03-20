@@ -2,26 +2,28 @@ import httpx
 import json
 import tiktoken
 import re
-from fastapi import HTTPException # <--- ADD THIS IMPORT
+from fastapi import HTTPException
 from app.config import settings
-from app.sanitizer import sanitize_text, desanitize_text
+from app.sanitizer import sanitize_text, desanitize_text, PolicyBlockedException
 
 client = httpx.AsyncClient(timeout=120.0) 
 tokenizer = tiktoken.get_encoding("cl100k_base") 
-policy = settings.load_policy()
 
 def count_tokens(text: str) -> int:
     return len(tokenizer.encode(text))
 
 def select_model(prompt: str) -> str:
+    """
+    Smart Router: Decides which free model to use.
+    """
     prompt_lower = prompt.lower()
     reasoning_keywords = ["analyze", "think", "solve", "logic", "reason", "step-by-step", "explain why", "math", "complex"]
     
     if any(keyword in prompt_lower for keyword in reasoning_keywords):
-        print(f"[Router] Routing to REASONING model (liquid).")
+        print(f"[Router] Routing to REASONING model (Nemotron).")
         return settings.MODEL_REASONING
     else:
-        print(f"[Router] Routing to FAST model (arcee-ai).")
+        print(f"[Router] Routing to FAST model (Llama/Arcee).")
         return settings.MODEL_FAST
 
 async def forward_request(method: str, path: str, headers: dict, body: bytes):
@@ -48,51 +50,31 @@ async def forward_request(method: str, path: str, headers: dict, body: bytes):
             token_count = count_tokens(full_text)
             
             if token_count > settings.MAX_INPUT_TOKENS:
-                # CLEAN ERROR: 400 Bad Request
                 raise HTTPException(
                     status_code=400, 
                     detail=f"Security Alert: Input too large ({token_count} tokens). Limit is {settings.MAX_INPUT_TOKENS}."
                 )
 
-            # --- 2. AGENT SECURITY GUARDRAILS ---
-            agent_sec = policy.get('agent_security', {})
-            
-            # Check Blocked Domains
-            for domain in agent_sec.get('blocked_domains', []):
-                if domain in full_text:
-                    # CLEAN ERROR: 403 Forbidden
-                    raise HTTPException(
-                        status_code=403, 
-                        detail=f"Security Policy Violation: Blocked domain '{domain}' detected."
-                    )
+            # --- 2. ENFORCE FREE MODELS (Cost Control) ---
+            # We ignore whatever model the user asked for and FORCE a free one.
+            # This guarantees $0 cost.
+            data["model"] = select_model(full_text)
 
-            # Check Dangerous Patterns
-            for pattern in agent_sec.get('blocked_patterns', []):
-                if re.search(pattern, full_text, re.IGNORECASE):
-                    # CLEAN ERROR: 403 Forbidden
-                    raise HTTPException(
-                        status_code=403, 
-                        detail=f"Security Policy Violation: Dangerous action blocked."
-                    )
-
-            # --- 3. SMART MODEL SELECTION ---
-            if "model" not in data or data["model"] == "auto" or data["model"].startswith("gpt"):
-                data["model"] = select_model(full_text)
-
-            # --- 4. REASONING MODEL CONFIG ---
+            # --- 3. REASONING MODEL CONFIG ---
             if "nemotron" in data["model"]:
                 data["reasoning"] = {"enabled": True}
                 print("[Config] Enabled Reasoning Mode.")
 
-            # --- 5. OUTPUT TOKEN LIMIT ---
+            # --- 4. OUTPUT TOKEN LIMIT ---
             if "max_tokens" not in data:
                 data["max_tokens"] = settings.MAX_OUTPUT_TOKENS
 
-            # --- 6. SANITIZATION ---
+            # --- 5. SANITIZATION ---
             if "messages" in data:
+                # Inject System Instruction
                 system_instruction = {
                     "role": "system",
-                    "content": "CRITICAL SECURITY INSTRUCTION: You must preserve all placeholders (e.g., <SECRET_123>, <EMAIL_ADDRESS_abc>) exactly as written."
+                    "content": "CRITICAL SECURITY INSTRUCTION: You must preserve all placeholders (e.g., <SECRET_123>) exactly as written."
                 }
                 data["messages"].insert(0, system_instruction)
 
@@ -105,9 +87,11 @@ async def forward_request(method: str, path: str, headers: dict, body: bytes):
                 print(f"[IronLayer] Secure payload sent to {data['model']}.")
                 body = json.dumps(data).encode('utf-8')
                 
-        except HTTPException as e:
-            # Re-raise our clean HTTP errors so FastAPI handles them
-            raise e
+        except PolicyBlockedException as e:
+            # Handle the Block Mode
+            print(f"!!! [IronLayer] REQUEST BLOCKED: {e}")
+            raise HTTPException(status_code=403, detail=str(e))
+            
         except Exception as e:
             print(f"!!! [IronLayer] CRITICAL ERROR: {e}")
             raise HTTPException(status_code=500, detail=f"Internal Proxy Error: {str(e)}")

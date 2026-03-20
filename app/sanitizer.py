@@ -1,78 +1,130 @@
-from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerRegistry
-from presidio_analyzer.context_aware_enhancers import LemmaContextAwareEnhancer
+from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from .store import SessionStore
 from .config import settings
 import uuid
+import hashlib
 
-# --- Load Policy and Initialize Engines ---
+# Load Policy
 policy = settings.load_policy()
-registry = RecognizerRegistry()
 
-# 1. Add Custom Patterns from YAML
+# --- Custom Exception for Blocking ---
+class PolicyBlockedException(Exception):
+    """Raised when content violates the security policy in 'block' mode."""
+    pass
+
+# --- Engine Setup ---
+analyzer = AnalyzerEngine(supported_languages=["en"])
+anonymizer = AnonymizerEngine()
+
+# Add Custom Patterns
 if "custom_patterns" in policy:
-    for p in policy["custom_patterns"]:
+    for p in policy['custom_patterns']:
         pattern = Pattern(name=p['name'], regex=p['regex'], score=p['score'])
         recognizer = PatternRecognizer(
             supported_entity=p['name'], 
             patterns=[pattern],
-            context=p.get('context', []) 
+            context=p.get('context', [])
         )
-        registry.add_recognizer(recognizer)
+        analyzer.registry.add_recognizer(recognizer)
 
-# 2. Enable Context Awareness (Smart Detection)
-context_enhancer = LemmaContextAwareEnhancer(
-    context_similarity_factor=0.45,
-    min_score_with_context_similarity=0.4
-)
+# --- Helper Functions ---
 
-# 3. Initialize Analyzer & Anonymizer
-analyzer = AnalyzerEngine(
-    registry=registry,
-    context_aware_enhancer=context_enhancer,
-    supported_languages=["en"]
-)
-anonymizer = AnonymizerEngine()
-
-def generate_placeholder(entity_type: str) -> str:
-    unique_id = uuid.uuid4().hex[:6]
-    return f"<{entity_type}_{unique_id}>"
+def generate_deterministic_placeholder(entity_type: str, sensitive_text: str) -> str:
+    """
+    Generates a unique placeholder based on the content of the sensitive text.
+    Ensures "John" -> <PERSON_abc12> and "Jane" -> <PERSON_xyz99>.
+    """
+    # Get format config
+    fmt_config = policy.get('placeholder_format', {})
+    mode = fmt_config.get('mode', 'default')
+    
+    # Use a hash of the sensitive text for uniqueness
+    # We take first 6 chars of MD5 hash for a short unique ID
+    unique_id = hashlib.md5(sensitive_text.encode()).hexdigest()[:6]
+    
+    if mode == "numeric":
+        # For numeric, we can't be deterministic easily without state, 
+        # so we just use the hash ID as the number substitute or stick to default
+        return f"({entity_type.lower()}_{unique_id[:4]})"
+    elif mode == "redacted":
+        return "[REDACTED]"
+    else:
+        return f"<{entity_type}_{unique_id}>"
 
 def sanitize_text(text: str) -> str:
     if not text:
         return text
 
+    # Reload policy to allow hot-reloading
+    policy = settings.load_policy()
+    
     original_text = text
     detected_entities = []
 
-    # 1. Handle Custom Secrets (IP Protection)
-    # Note: Presidio handles these via the registry we loaded, so one analyze call covers both built-in and custom.
+    # 1. Analyze
+    results = analyzer.analyze(text=text, language='en')
     
-    # 2. Analyze Text
-    # If policy disabled PII, we only check custom patterns (handled by registry logic)
-    entities_to_check = None 
-    if not policy.get('pii', {}).get('enabled', True):
-        entities_to_check = [p['name'] for p in policy.get('custom_patterns', [])]
+    # 2. Handle Policy Modes
+    action_mode = policy.get('action_mode', 'mask')
 
-    results = analyzer.analyze(text=text, language='en', entities=entities_to_check)
-    
-    # 3. Anonymize
     if results:
+        # A. BLOCK MODE
+        if action_mode == "block":
+            from app.audit_logger import log_audit_event
+            log_audit_event("request_blocked", original_text, "", [r.entity_type for r in results])
+            raise PolicyBlockedException(
+                f"Security Policy Violation: Blocked {len(results)} sensitive items."
+            )
+
+        # B. WARN MODE
+        if action_mode == "warn":
+            print(f"[IronLayer WARNING] Detected {len(results)} items but allowing passage (Warn Mode).")
+            from app.audit_logger import log_audit_event
+            log_audit_event("request_warned", original_text, "", [r.entity_type for r in results])
+            return text
+
+        # C. MASK MODE (Default)
         operators = {}
+        
+        # We iterate results to create a specific replacement for EACH instance
+        # Note: To handle overlaps correctly, we rely on the Anonymizer engine.
+        # We simply map the Entity Type to a function that generates the placeholder.
+        
+        # Since we can't pass dynamic args easily to the operator, 
+        # we will use the standard "replace" operator, but we construct the mapping manually first?
+        # No, the anonymizer needs the operator config.
+        
+        # STRATEGY: Use the "replace" operator. 
+        # Since "replace" takes a static string, we cannot use it for unique IDs per word easily 
+        # unless we map specific text instances.
+        
+        # SAFEST STRATEGY: Sort reverse and replace manually (as we did before), 
+        # but use the Deterministic Placeholder function.
+        
+        # Sort results by start index in reverse order to handle indices correctly
+        results = sorted(results, key=lambda x: x.start, reverse=True)
+        
         for result in results:
             entity_type = result.entity_type
-            placeholder = generate_placeholder(entity_type)
             sensitive_text = text[result.start:result.end]
+            
+            # Generate Unique Placeholder
+            placeholder = generate_deterministic_placeholder(entity_type, sensitive_text)
+            
+            # Save Mapping
             SessionStore.save(placeholder, sensitive_text)
-            operators[entity_type] = OperatorConfig("replace", {"new_value": placeholder})
             detected_entities.append(entity_type)
 
-        text = anonymizer.anonymize(text=text, analyzer_results=results, operators=operators).text
+            # Perform replacement manually
+            text = text[:result.start] + placeholder + text[result.end:]
 
-    # 4. Logging
+    # 3. Audit Logging for Mask Mode
     if detected_entities:
         print(f"[IronLayer] Scrubbed {len(detected_entities)} items: {list(set(detected_entities))}")
+        from app.audit_logger import log_audit_event
+        log_audit_event("prompt_sanitized", original_text, text, detected_entities)
 
     return text
 
@@ -81,11 +133,11 @@ def desanitize_text(text: str) -> str:
         return text
             
     import re
-    placeholders = re.findall(r'<[A-Z_]+_[a-z0-9]+>', text)
+    candidates = re.findall(r'<[A-Z_]+_[a-z0-9]+>|\([a-z]+_[a-z0-9]+\)', text)
     
-    for ph in placeholders:
-        real_value = SessionStore.get(ph)
+    for candidate in candidates:
+        real_value = SessionStore.get(candidate)
         if real_value:
-            text = text.replace(ph, real_value)
+            text = text.replace(candidate, real_value)
             
     return text

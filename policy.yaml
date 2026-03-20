@@ -171,3 +171,10 @@ logging:
   
   # What to log
   log_content: false # WARNING: Set to true only if you need to debug actual PII flows. False is safer for production.
+
+  
+
+action_mode: "block"
+placeholder_format:
+  mode: "numeric"
+  custom_pattern: "({entity} {id})"

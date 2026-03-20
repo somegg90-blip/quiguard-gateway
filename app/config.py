@@ -8,19 +8,22 @@ class Settings(BaseSettings):
     API_KEY: str = ""
     OPENAI_API_KEY: str = "" 
     
-    # Token Limits
+    # Token Limits (Safe defaults)
     MAX_INPUT_TOKENS: int = 8000
-    MAX_OUTPUT_TOKENS: int = 8000
+    MAX_OUTPUT_TOKENS: int = 2000
     
-    # Model Aliases
+    # --- FREE MODELS ONLY ---
+    # Reasoning: Liquid LFM (Specializes in thinking)
     MODEL_REASONING: str = "liquid/lfm-2.5-1.2b-thinking:free"
+    
+    # Fast: Arcee Trinity (Fast responses)
     MODEL_FAST: str = "arcee-ai/trinity-large-preview:free"
 
-    # Configure Pydantic to ignore extra vars (like old CUSTOM_SECRET_WORDS)
+    # Configure Pydantic
     model_config = SettingsConfigDict(
         env_file=".env", 
         env_file_encoding="utf-8",
-        extra="ignore"  # <--- THIS IS THE FIX
+        extra="ignore"
     )
 
     @property
