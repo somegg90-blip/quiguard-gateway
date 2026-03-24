@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     @property
     def headers(self):
         return {
-            "HTTP-Referer": "https://ironlayer.ai", 
-            "X-Title": "IronLayer-Security-Gateway"
+            "HTTP-Referer": "https://quiguard.ai", 
+            "X-Title": "QuiGuard-Security-Gateway"
         }
 
     def load_policy(self):

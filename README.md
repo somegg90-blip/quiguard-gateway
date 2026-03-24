@@ -1,6 +1,6 @@
-# 🛡️ IronLayer: The AI Agent Firewall
+# 🛡️ QuiGuard: The AI Agent Firewall
 
-IronLayer is a self-hosted API gateway that acts as a security firewall for Large Language Models (LLMs) and AI Agents. It ensures sensitive data (PII, IP, Secrets) never leaves your network.
+QuiGuard is a self-hosted API gateway that acts as a security firewall for Large Language Models (LLMs) and AI Agents. It ensures sensitive data (PII, IP, Secrets) never leaves your network.
 
 ---
 
@@ -11,7 +11,7 @@ We are moving from "Chatbots" to "Agents". Agents don't just talk — they execu
 - **Prompt Leaks:** Users paste API keys into prompts.
 - **Tool Call Leaks:** Agents read internal tickets/emails and send that data to external models.
 
-**IronLayer fixes this.** It sits between your agents and the LLM provider, sanitizing data in real-time.
+**QuiGuard fixes this.** It sits between your agents and the LLM provider, sanitizing data in real-time.
 
 ---
 
@@ -32,12 +32,12 @@ We are moving from "Chatbots" to "Agents". Agents don't just talk — they execu
 
 ## 🐳 Quick Start (Docker)
 
-The fastest way to get IronLayer running.
+The fastest way to get QuiGuard running.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/somegg90-blip/ironlayer-gateway.git
-cd ironlayer-gateway
+git clone https://github.com/somegg90-blip/QuiGuard-gateway.git
+cd QuiGuard-gateway
 
 # 2. Configure Environment
 echo "API_KEY=your_openrouter_key" > .env
@@ -52,18 +52,18 @@ Your proxy is now running at `http://localhost:8000`.
 
 ## ⚙️ Usage (Python)
 
-Point your OpenAI client to the IronLayer proxy URL.
+Point your OpenAI client to the QuiGuard proxy URL.
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8000/v1",  # Point to IronLayer
-    api_key="dummy_key"                   # IronLayer manages the real key
+    base_url="http://localhost:8000/v1",  # Point to QuiGuard
+    api_key="dummy_key"                   # QuiGuard manages the real key
 )
 
 response = client.chat.completions.create(
-    model="auto",  # Let IronLayer optimize the model
+    model="auto",  # Let QuiGuard optimize the model
     messages=[{"role": "user", "content": "My email is test@test.com"}]
 )
 
@@ -108,4 +108,4 @@ agent_security:
 
 ## 📜 License
 
-IronLayer is released under the [MIT License](LICENSE).
+QuiGuard is released under the [MIT License](LICENSE).

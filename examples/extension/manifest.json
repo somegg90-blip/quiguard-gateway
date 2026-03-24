@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "IronLayer Secure Chat",
+  "name": "QuiGuard Secure Chat",
   "version": "1.0",
   "description": "A secure chat window that scrubs PII before sending to AI.",
   "permissions": ["activeTab"],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "IronLayer"
+    "default_title": "QuiGuard"
   }
 }
