@@ -3,8 +3,8 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from .store import SessionStore
 from .config import settings
-import uuid
 import hashlib
+import json
 
 # Load Policy
 policy = settings.load_policy()
@@ -36,17 +36,13 @@ def generate_deterministic_placeholder(entity_type: str, sensitive_text: str) ->
     Generates a unique placeholder based on the content of the sensitive text.
     Ensures "John" -> <PERSON_abc12> and "Jane" -> <PERSON_xyz99>.
     """
-    # Get format config
     fmt_config = policy.get('placeholder_format', {})
     mode = fmt_config.get('mode', 'default')
     
     # Use a hash of the sensitive text for uniqueness
-    # We take first 6 chars of MD5 hash for a short unique ID
     unique_id = hashlib.md5(sensitive_text.encode()).hexdigest()[:6]
     
     if mode == "numeric":
-        # For numeric, we can't be deterministic easily without state, 
-        # so we just use the hash ID as the number substitute or stick to default
         return f"({entity_type.lower()}_{unique_id[:4]})"
     elif mode == "redacted":
         return "[REDACTED]"
@@ -57,20 +53,15 @@ def sanitize_text(text: str) -> str:
     if not text:
         return text
 
-    # Reload policy to allow hot-reloading
-    policy = settings.load_policy()
+    policy = settings.load_policy() # Hot reload
     
     original_text = text
     detected_entities = []
-
-    # 1. Analyze
-    results = analyzer.analyze(text=text, language='en')
-    
-    # 2. Handle Policy Modes
     action_mode = policy.get('action_mode', 'mask')
 
+    results = analyzer.analyze(text=text, language='en')
+    
     if results:
-        # A. BLOCK MODE
         if action_mode == "block":
             from app.audit_logger import log_audit_event
             log_audit_event("request_blocked", original_text, "", [r.entity_type for r in results])
@@ -78,31 +69,13 @@ def sanitize_text(text: str) -> str:
                 f"Security Policy Violation: Blocked {len(results)} sensitive items."
             )
 
-        # B. WARN MODE
         if action_mode == "warn":
-            print(f"[IronLayer WARNING] Detected {len(results)} items but allowing passage (Warn Mode).")
+            print(f"[QuiGuard WARNING] Detected {len(results)} items but allowing passage.")
             from app.audit_logger import log_audit_event
             log_audit_event("request_warned", original_text, "", [r.entity_type for r in results])
             return text
 
-        # C. MASK MODE (Default)
-        operators = {}
-        
-        # We iterate results to create a specific replacement for EACH instance
-        # Note: To handle overlaps correctly, we rely on the Anonymizer engine.
-        # We simply map the Entity Type to a function that generates the placeholder.
-        
-        # Since we can't pass dynamic args easily to the operator, 
-        # we will use the standard "replace" operator, but we construct the mapping manually first?
-        # No, the anonymizer needs the operator config.
-        
-        # STRATEGY: Use the "replace" operator. 
-        # Since "replace" takes a static string, we cannot use it for unique IDs per word easily 
-        # unless we map specific text instances.
-        
-        # SAFEST STRATEGY: Sort reverse and replace manually (as we did before), 
-        # but use the Deterministic Placeholder function.
-        
+        # MASK MODE
         # Sort results by start index in reverse order to handle indices correctly
         results = sorted(results, key=lambda x: x.start, reverse=True)
         
@@ -110,23 +83,63 @@ def sanitize_text(text: str) -> str:
             entity_type = result.entity_type
             sensitive_text = text[result.start:result.end]
             
-            # Generate Unique Placeholder
             placeholder = generate_deterministic_placeholder(entity_type, sensitive_text)
             
-            # Save Mapping
             SessionStore.save(placeholder, sensitive_text)
             detected_entities.append(entity_type)
 
             # Perform replacement manually
             text = text[:result.start] + placeholder + text[result.end:]
 
-    # 3. Audit Logging for Mask Mode
     if detected_entities:
-        print(f"[IronLayer] Scrubbed {len(detected_entities)} items: {list(set(detected_entities))}")
+        print(f"[QuiGuard] Scrubbed {len(detected_entities)} items: {list(set(detected_entities))}")
         from app.audit_logger import log_audit_event
         log_audit_event("prompt_sanitized", original_text, text, detected_entities)
 
     return text
+
+# --- NEW: Recursive JSON Handling ---
+
+def sanitize_tool_arguments(args_str: str) -> str:
+    """
+    Safely sanitizes JSON arguments by parsing them first.
+    Handles nested structures and stringified JSON.
+    """
+    try:
+        # 1. Parse the JSON string into a Python dict
+        args_dict = json.loads(args_str)
+        
+        # 2. Recursively scrub values in the dict
+        scrubbed_dict = _recursive_scrub(args_dict)
+        
+        # 3. Convert back to string
+        return json.dumps(scrubbed_dict)
+        
+    except json.JSONDecodeError:
+        # Fallback: If it's not valid JSON, treat as raw text
+        return sanitize_text(args_str)
+
+def _recursive_scrub(data):
+    """
+    Recursively walks through JSON data and scrubs strings.
+    """
+    if isinstance(data, dict):
+        return {k: _recursive_scrub(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [_recursive_scrub(item) for item in data]
+    elif isinstance(data, str):
+        # It's a string. Is it stringified JSON? Try to parse.
+        try:
+            nested_data = json.loads(data)
+            # It was JSON! Scrub it recursively.
+            scrubbed_nested = _recursive_scrub(nested_data)
+            return json.dumps(scrubbed_nested)
+        except json.JSONDecodeError:
+            # Not JSON, just a normal string. Scrub PII.
+            return sanitize_text(data)
+    else:
+        # Int, Bool, Float, None - return as is
+        return data
 
 def desanitize_text(text: str) -> str:
     if not text:
