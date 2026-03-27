@@ -141,6 +141,28 @@ def _recursive_scrub(data):
         # Int, Bool, Float, None - return as is
         return data
 
+# --- NEW: Phase 2 - Inbound Tool Response Scrubbing ---
+
+def sanitize_tool_response(content: str) -> str:
+    """
+    Sanitizes the content of a tool response (e.g., a Jira ticket or SQL result)
+    before it enters the agent's context window.
+    """
+    if not content:
+        return content
+    
+    print("[QuiGuard] Sanitizing Inbound Tool Response...")
+    
+    # Tool responses are often stringified JSON or plain text.
+    # We use the same recursive logic as arguments.
+    try:
+        data = json.loads(content)
+        scrubbed_data = _recursive_scrub(data)
+        return json.dumps(scrubbed_data)
+    except json.JSONDecodeError:
+        # Not JSON, just treat as text
+        return sanitize_text(content)
+
 def desanitize_text(text: str) -> str:
     if not text:
         return text

@@ -3,7 +3,8 @@ import json
 import tiktoken
 from fastapi import HTTPException
 from app.config import settings
-from app.sanitizer import sanitize_text, sanitize_tool_arguments, desanitize_text, PolicyBlockedException
+# UPDATED: Added sanitize_tool_response
+from app.sanitizer import sanitize_text, sanitize_tool_arguments, sanitize_tool_response, desanitize_text, PolicyBlockedException
 
 client = httpx.AsyncClient(timeout=120.0) 
 tokenizer = tiktoken.get_encoding("cl100k_base") 
@@ -63,15 +64,20 @@ async def forward_request(method: str, path: str, headers: dict, body: bytes):
                     if isinstance(message.get("content"), str):
                         message["content"] = sanitize_text(message["content"])
                     
-                    # B. Sanitize Tool Calls (Agent Support)
+                    # B. Sanitize Tool Calls (Agent Support - Outbound)
                     if "tool_calls" in message:
                         for tool_call in message["tool_calls"]:
                             if "function" in tool_call and "arguments" in tool_call["function"]:
                                 args_str = tool_call["function"]["arguments"]
-                                # USE THE NEW RECURSIVE SCRUBBER
                                 scrubbed_args = sanitize_tool_arguments(args_str)
                                 tool_call["function"]["arguments"] = scrubbed_args
                                 print("[QuiGuard] Sanitized Agent Tool Call arguments.")
+
+                    # C. NEW: Sanitize Tool Responses (Inbound - The Gatekeeper)
+                    if message.get("role") == "tool":
+                        if isinstance(message.get("content"), str):
+                            # This is the raw data coming back from Jira/Slack/SQL
+                            message["content"] = sanitize_tool_response(message["content"])
 
                 print(f"[QuiGuard] Secure payload sent to {data['model']}.")
                 body = json.dumps(data).encode('utf-8')
