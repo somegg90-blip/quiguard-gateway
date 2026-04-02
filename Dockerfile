@@ -38,9 +38,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 # ---- Start Command ----
 # gunicorn for production (multiple workers, graceful restarts)
-CMD ["gunicorn", "app.main:app", \
-     "--bind", "0.0.0.0:8000", \
-     "--workers", "1", \
-     "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--timeout", "120", \
-     "--graceful-timeout", "30"]
+CMD gunicorn app.main:app --bind 0.0.0.0:${PORT:-8000} --workers 1 --worker-class uvicorn.workers.UvicornWorker --timeout 120 --graceful-timeout 30 --access-logfile -
