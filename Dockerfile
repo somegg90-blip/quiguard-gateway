@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # ---- Download SpaCy Model ----
 RUN python -m spacy download en_core_web_sm
+RUN python -m spacy download en_core_web_lg
 
 # ---- Application Code ----
 COPY app ./app
