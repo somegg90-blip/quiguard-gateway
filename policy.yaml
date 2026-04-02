@@ -65,7 +65,6 @@ pii:
     - URL               # Often too broad, but useful for internal URLs
     - DOMAIN_NAME
 
-  enabled: true
   action_mode: mask
   placeholder_format:
   mode: default # Change to "numeric" if you want (email_address_123) format
@@ -73,25 +72,19 @@ pii:
 custom_patterns:
   - name: CUSTOM_US_SSN
     regex: '\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b'
-    score: 0.95 # High score to override DATE_TIME
+    score: 0.95
     context: ['ssn', 'social', 'security', 'number']
-# ==========================================
-# 3. INTELLECTUAL PROPERTY (Custom Secrets)
-# ==========================================
-# Define your company's specific secrets here.
-# These use Regex patterns and "Context Words" for accuracy.
-  # Example 2: Internal API Keys (Generic)
+
+  # These 3 need to be indented under custom_patterns:
   - name: "INTERNAL_API_KEY"
     regex: "sk-(live|test)-[a-zA-Z0-9]{24,32}"
     score: 0.95
     
-  # Example 3: Employee IDs
   - name: "EMPLOYEE_ID"
     regex: "EMP-\\d{6}"
     score: 0.8
     context: ["employee", "staff", "manager", "id"]
 
-  # Example 4: Confidential Financial Documents
   - name: "CONFIDENTIAL_DOC"
     regex: "Conf-SAL-[0-9]{4}"
     score: 0.9
@@ -172,10 +165,3 @@ logging:
   
   # What to log
   log_content: false # WARNING: Set to true only if you need to debug actual PII flows. False is safer for production.
-
-  
-
-action_mode: "mask"
-placeholder_format:
-  mode: "numeric"
-  custom_pattern: "({entity} {id})"
