@@ -65,20 +65,21 @@ pii:
     - URL               # Often too broad, but useful for internal URLs
     - DOMAIN_NAME
 
+  enabled: true
+  action_mode: mask
+  placeholder_format:
+  mode: default # Change to "numeric" if you want (email_address_123) format
+
+custom_patterns:
+  - name: CUSTOM_US_SSN
+    regex: '\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b'
+    score: 0.95 # High score to override DATE_TIME
+    context: ['ssn', 'social', 'security', 'number']
 # ==========================================
 # 3. INTELLECTUAL PROPERTY (Custom Secrets)
 # ==========================================
 # Define your company's specific secrets here.
 # These use Regex patterns and "Context Words" for accuracy.
-custom_patterns:
-  
-  # Example 1: Project Codenames
-  - name: "PROJECT_STARLIGHT"
-    regex: "(ProjectStarlight|Starlight-Initiative|XZ-100)"
-    score: 0.85
-    # Context words increase confidence if found near the match
-    context: ["project", "deadline", "budget", "launch", "team"]
-
   # Example 2: Internal API Keys (Generic)
   - name: "INTERNAL_API_KEY"
     regex: "sk-(live|test)-[a-zA-Z0-9]{24,32}"

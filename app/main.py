@@ -1,17 +1,27 @@
-from fastapi import FastAPI, Request, Response
+from dotenv import load_dotenv
+load_dotenv()
+from fastapi import FastAPI, Request, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi import HTTPException
 from app.proxy import forward_request, process_response
 from app.store import SessionStore
+from app.auth_middleware import validate_api_key, check_rate_limit, create_api_key_for_user, list_api_keys_for_user, revoke_api_key
 import asyncio
 import json
 import os
+from datetime import datetime, timedelta
+from typing import Optional
+from pydantic import BaseModel
 
 app = FastAPI(
     title="QuiGuard API",
     description="The Security Layer for AI. Redacts PII, enforces policies, and manages model routing.",
-    version="1.0.0"
+    version="2.0.0"  # Phase 4: Multi-tenancy
 )
+
+# Routes that should NOT require API key auth (public endpoints)
+PUBLIC_PATHS = {"/health", "/api/audit-logs", "/api/audit-stats", "/api/keys"}
 
 # CORS Middleware
 app.add_middleware(
@@ -31,80 +41,437 @@ async def startup_event():
             await asyncio.sleep(60)
     asyncio.create_task(cleanup_task())
 
+
+# ============================================================
+# Helper: Get Supabase client (server-side)
+# ============================================================
+
+def _get_supabase_client():
+    """Get Supabase client for server-side reads."""
+    try:
+        from supabase import create_client
+        supabase_url = os.getenv("SUPABASE_URL", "")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+        if not supabase_url or not supabase_key:
+            return None
+        return create_client(supabase_url, supabase_key)
+    except Exception:
+        return None
+
+
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "version": "1.0.0"}
+    return {"status": "healthy", "version": "2.0.0"}
 
-# --- NEW: Phase 3 - The Secure Ledger ---
+
+# ============================================================
+# Phase 3: Secure Ledger - Audit Logs API
+# ============================================================
 
 @app.get("/api/audit-logs")
-async def get_audit_logs():
+async def get_audit_logs(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    event_type: Optional[str] = Query(None),
+    risk_only: bool = Query(False),
+    hours: Optional[int] = Query(None, description="Filter to last N hours"),
+):
     """
-    Securely retrieves the last N audit log entries.
-    Strips 'original_snippet' to ensure PII never reaches the browser UI.
+    Retrieves audit log entries from Supabase.
+    
+    SECURITY: By default, strips 'original_snippet' so PII never reaches the browser.
+    Set ?include_original=true to get full data (admin-only in production).
+    
+    Query Params:
+        limit: Max entries to return (1-1000)
+        offset: Pagination offset
+        event_type: Filter by event type (e.g., "prompt_sanitized", "request_blocked")
+        risk_only: Only return entries where risk was detected
+        hours: Only return entries from the last N hours
     """
-    LOG_FILE = "audit_log.jsonl"
-    limit = 100 # Return last 100 entries
+    supabase = _get_supabase_client()
     
-    logs = []
-    
-    if not os.path.exists(LOG_FILE):
-        return JSONResponse(content={"logs": []})
+    # ---- FALLBACK: Read from local file if Supabase not configured ----
+    if supabase is None:
+        LOG_FILE = "audit_log.jsonl"
+        logs = []
+        
+        if not os.path.exists(LOG_FILE):
+            return JSONResponse(content={"logs": [], "total": 0})
 
-    try:
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            # Read lines efficiently from the end
-            lines = f.readlines()[-limit:] 
+        try:
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()[-limit:] 
+                
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+                    
+                    # Filter by event_type if specified
+                    if event_type and entry.get("event") != event_type:
+                        continue
+                    
+                    # Filter by risk_only if specified
+                    if risk_only and not entry.get("risk_detected", False):
+                        continue
+                    
+                    # SECURITY: Remove raw PII
+                    secure_entry = {
+                        "timestamp": entry.get("timestamp"),
+                        "event": entry.get("event"),
+                        "risk_detected": entry.get("risk_detected"),
+                        "entities_blocked": entry.get("entities_blocked"),
+                        "sanitized_snippet": entry.get("sanitized_snippet"),
+                        "id": None
+                    }
+                    logs.append(secure_entry)
+                    
+            return JSONResponse(content={"logs": logs, "total": len(logs)})
             
-            for line in lines:
-                if not line.strip(): continue
-                
-                entry = json.loads(line)
-                
-                # SECURITY: Remove the raw PII before sending to frontend
-                # We only keep the 'sanitized_snippet' and metadata
-                secure_entry = {
-                    "timestamp": entry.get("timestamp"),
-                    "event": entry.get("event"),
-                    "risk_detected": entry.get("risk_detected"),
-                    "entities_blocked": entry.get("entities_blocked"),
-                    "sanitized_snippet": entry.get("sanitized_snippet")
-                }
-                logs.append(secure_entry)
-                
-        return JSONResponse(content={"logs": logs})
+        except Exception as e:
+            print(f"Error reading local logs: {e}")
+            return JSONResponse(content={"error": "Failed to read logs"}, status_code=500)
+    
+    # ---- PRIMARY: Read from Supabase Postgres ----
+    try:
+        query = supabase.table("audit_logs").select(
+            "id, timestamp, event, risk_detected, entities_blocked, sanitized_snippet",
+            count="exact"
+        )
+        
+        # Apply filters
+        if event_type:
+            query = query.eq("event", event_type)
+        
+        if risk_only:
+            query = query.eq("risk_detected", True)
+        
+        if hours:
+            cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+            query = query.gte("timestamp", cutoff)
+        
+        # Order by newest first
+        query = query.order("timestamp", desc=True)
+        
+        # Paginate
+        query = query.range(offset, offset + limit - 1)
+        
+        response = query.execute()
+        
+        logs = []
+        for row in response.data:
+            logs.append({
+                "id": row.get("id"),
+                "timestamp": row.get("timestamp"),
+                "event": row.get("event"),
+                "risk_detected": row.get("risk_detected"),
+                "entities_blocked": row.get("entities_blocked", []),
+                "sanitized_snippet": row.get("sanitized_snippet"),
+            })
+        
+        total = response.count if hasattr(response, 'count') else len(logs)
+        
+        return JSONResponse(content={
+            "logs": logs,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        })
         
     except Exception as e:
-        print(f"Error reading logs: {e}")
+        print(f"[Audit API] Error reading from Supabase: {e}")
         return JSONResponse(content={"error": "Failed to read logs"}, status_code=500)
 
-# --- Existing Proxy Route ---
+
+@app.get("/api/audit-stats")
+async def get_audit_stats(
+    hours: int = Query(24, ge=1, le=720, description="Stats for the last N hours"),
+):
+    """
+    Returns aggregated statistics for the dashboard.
+    Used by the frontend to render summary cards and charts.
+    """
+    supabase = _get_supabase_client()
+    
+    if supabase is None:
+        # Fallback: Calculate from local file
+        LOG_FILE = "audit_log.jsonl"
+        if not os.path.exists(LOG_FILE):
+            return JSONResponse(content={
+                "total_events": 0,
+                "blocked": 0,
+                "sanitized": 0,
+                "top_entities": [],
+                "events_over_time": [],
+            })
+        
+        try:
+            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            entries = []
+            
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+                    try:
+                        ts = datetime.fromisoformat(entry.get("timestamp", ""))
+                        if ts >= cutoff:
+                            entries.append(entry)
+                    except (ValueError, TypeError):
+                        continue
+            
+            total = len(entries)
+            blocked = sum(1 for e in entries if e.get("event") == "request_blocked")
+            sanitized = sum(1 for e in entries if e.get("event") == "prompt_sanitized")
+            
+            # Top entities
+            entity_counts = {}
+            for e in entries:
+                for ent in e.get("entities_blocked", []):
+                    entity_counts[ent] = entity_counts.get(ent, 0) + 1
+            top_entities = sorted(entity_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            
+            # Events over time (grouped by hour)
+            hourly = {}
+            for e in entries:
+                try:
+                    ts = datetime.fromisoformat(e.get("timestamp", ""))
+                    hour_key = ts.strftime("%Y-%m-%dT%H:00:00")
+                    hourly[hour_key] = hourly.get(hour_key, 0) + 1
+                except (ValueError, TypeError):
+                    continue
+            
+            events_over_time = [{"hour": k, "count": v} for k, v in sorted(hourly.items())]
+            
+            return JSONResponse(content={
+                "total_events": total,
+                "blocked": blocked,
+                "sanitized": sanitized,
+                "top_entities": top_entities,
+                "events_over_time": events_over_time,
+            })
+            
+        except Exception as e:
+            print(f"[Audit Stats] Local file error: {e}")
+            return JSONResponse(content={"error": "Failed to compute stats"}, status_code=500)
+    
+    # ---- PRIMARY: Read from Supabase ----
+    try:
+        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        
+        # 1. Total events in the window
+        total_response = supabase.table("audit_logs").select(
+            "id", count="exact"
+        ).gte("timestamp", cutoff).execute()
+        total_events = total_response.count if hasattr(total_response, 'count') else len(total_response.data)
+        
+        # 2. Blocked count
+        blocked_response = supabase.table("audit_logs").select(
+            "id", count="exact"
+        ).gte("timestamp", cutoff).eq("event", "request_blocked").execute()
+        blocked = blocked_response.count if hasattr(blocked_response, 'count') else len(blocked_response.data)
+        
+        # 3. Sanitized count
+        sanitized_response = supabase.table("audit_logs").select(
+            "id", count="exact"
+        ).gte("timestamp", cutoff).eq("event", "prompt_sanitized").execute()
+        sanitized = sanitized_response.count if hasattr(sanitized_response, 'count') else len(sanitized_response.data)
+        
+        # 4. All entries for entity counting and time series
+        all_response = supabase.table("audit_logs").select(
+            "timestamp, entities_blocked, event"
+        ).gte("timestamp", cutoff).order("timestamp", desc=True).execute()
+        
+        # Top entities
+        entity_counts = {}
+        for row in all_response.data:
+            for ent in row.get("entities_blocked", []):
+                entity_counts[ent] = entity_counts.get(ent, 0) + 1
+        top_entities = sorted(entity_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        # Events over time (grouped by hour)
+        hourly = {}
+        for row in all_response.data:
+            try:
+                ts = row.get("timestamp", "")
+                if ts:
+                    # Handle both ISO strings with Z and without
+                    if isinstance(ts, str):
+                        ts = ts.replace("Z", "+00:00")
+                    dt = datetime.fromisoformat(ts)
+                    hour_key = dt.strftime("%Y-%m-%dT%H:00:00")
+                    hourly[hour_key] = hourly.get(hour_key, 0) + 1
+            except (ValueError, TypeError):
+                continue
+        
+        events_over_time = [{"hour": k, "count": v} for k, v in sorted(hourly.items())]
+        
+        return JSONResponse(content={
+            "total_events": total_events,
+            "blocked": blocked,
+            "sanitized": sanitized,
+            "top_entities": top_entities,
+            "events_over_time": events_over_time,
+        })
+        
+    except Exception as e:
+        print(f"[Audit Stats] Supabase error: {e}")
+        return JSONResponse(content={"error": "Failed to compute stats"}, status_code=500)
+
+
+# ============================================================
+# Phase 4: Subscription Endpoint
+# ============================================================
+
+@app.get("/api/subscription")
+async def get_subscription(user_id: str):
+    """Returns the subscription info for a user."""
+    supabase = _get_supabase_client()
+    if supabase is None:
+        return JSONResponse(content={"error": "Supabase not configured"}, status_code=500)
+    
+    try:
+        response = supabase.table("subscriptions").select(
+            "plan, status, monthly_request_count, monthly_request_limit, max_seats, max_api_keys, log_retention_days, current_period_start, current_period_end, trial_ends_at, created_at"
+        ).eq("user_id", user_id).limit(1).execute()
+        
+        if not response.data:
+            return JSONResponse(content={"error": "No subscription found"}, status_code=404)
+        
+        return JSONResponse(content=response.data[0])
+    except Exception as e:
+        print(f"[Subscription] Error: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# ============================================================
+# Phase 4: API Key Management Endpoints
+# These are called from the Next.js dashboard (server-side)
+# ============================================================
+
+class CreateKeyRequest(BaseModel):
+    user_id: str
+    name: str = "Default Key"
+
+@app.post("/api/keys/create")
+async def create_key(req: CreateKeyRequest):
+    """
+    Creates a new API key for a user.
+    Called from the Next.js dashboard server-side.
+    """
+    result = create_api_key_for_user(req.user_id, req.name)
+    
+    if result and "error" in result:
+        return JSONResponse(content=result, status_code=400)
+    
+    if result is None:
+        return JSONResponse(content={"error": "Failed to create key"}, status_code=500)
+    
+    return JSONResponse(content=result, status_code=201)
+
+@app.get("/api/keys")
+async def list_keys(user_id: str):
+    """
+    Lists all API keys for a user.
+    Called from the Next.js dashboard server-side.
+    """
+    keys = list_api_keys_for_user(user_id)
+    return JSONResponse(content={"keys": keys})
+
+@app.delete("/api/keys/{key_id}")
+async def delete_key(key_id: int, user_id: str):
+    """
+    Revokes an API key.
+    Called from the Next.js dashboard server-side.
+    """
+    success = revoke_api_key(key_id, user_id)
+    if not success:
+        return JSONResponse(content={"error": "Key not found or already revoked"}, status_code=404)
+    return JSONResponse(content={"message": "API key revoked successfully"})
+
+
+# ============================================================
+# Phase 4: Protected Proxy Route (with API Key Auth)
+# ============================================================
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def catch_all(request: Request, path: str):
-    # 1. Read Request
+    # 1. Check if this path requires auth
+    full_path = f"/{path}"
+    
+    # Skip auth for internal API routes (they handle their own auth via Supabase session)
+    if full_path.startswith("/api/"):
+        # Pass through to the specific API handlers above, or 404
+        return JSONResponse(content={"error": "Not found"}, status_code=404)
+    
+    # 2. Validate API Key for proxy traffic
+    api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
+    api_key = api_key or request.headers.get("X-QuiGuard-Key", "")
+    
+    key_info = validate_api_key(api_key)
+    
+    if key_info is None:
+        return JSONResponse(
+            content={
+                "error": {
+                    "message": "Invalid or missing API key.",
+                    "code": "AUTH_INVALID_KEY",
+                    "docs": "https://quiguard.ai/docs/api-keys"
+                }
+            },
+            status_code=401
+        )
+    
+    # 3. Check Rate Limit
+    allowed, message = check_rate_limit(key_info)
+    if not allowed:
+        return JSONResponse(
+            content={
+                "error": {
+                    "message": message,
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "plan": key_info.plan,
+                    "docs": "https://quiguard.ai/pricing"
+                }
+            },
+            status_code=429
+        )
+    
+    # 4. Read Request
     body = await request.body()
     headers = dict(request.headers)
     
-    # 2. Forward & Sanitize
-    upstream_response = await forward_request(
-        method=request.method,
-        path=path,
-        headers=headers,
-        body=body
-    )
+    # 5. Forward & Sanitize
+    try:
+        upstream_response = await forward_request(
+            method=request.method,
+            path=path,
+            headers=headers,
+            body=body
+        )
+    except HTTPException as e:
+        return JSONResponse(
+            content={"error": {"message": e.detail, "code": "PROXY_ERROR"}},
+            status_code=e.status_code
+        )
     
-    # 3. Process & Desanitize
+    # 6. Process & Desanitize
     final_body = await process_response(upstream_response, path)
     
-    # 4. Filter Headers
+    # 7. Filter Headers
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding']
     response_headers = {
         k: v for k, v in upstream_response.headers.items() 
         if k.lower() not in excluded_headers
     }
     
-    # 5. Return
+    # 8. Add usage headers (helpful for debugging)
+    response_headers["X-QuiGuard-Plan"] = key_info.plan
+    response_headers["X-QuiGuard-Usage"] = message
+    
+    # 9. Return
     return Response(
         content=final_body,
         status_code=upstream_response.status_code,

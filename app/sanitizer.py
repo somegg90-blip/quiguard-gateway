@@ -18,7 +18,7 @@ class PolicyBlockedException(Exception):
 analyzer = AnalyzerEngine(supported_languages=["en"])
 anonymizer = AnonymizerEngine()
 
-# Add Custom Patterns
+# Add Custom Patterns from policy.yaml
 if "custom_patterns" in policy:
     for p in policy['custom_patterns']:
         pattern = Pattern(name=p['name'], regex=p['regex'], score=p['score'])
@@ -75,10 +75,26 @@ def sanitize_text(text: str) -> str:
             log_audit_event("request_warned", original_text, "", [r.entity_type for r in results])
             return text
 
-        # MASK MODE
-        # Sort results by start index in reverse order to handle indices correctly
-        results = sorted(results, key=lambda x: x.start, reverse=True)
+        # --- FIX: REMOVE OVERLAPPING ENTITIES ---
+        # Presidio sometimes flags the same text as multiple things (e.g., EMAIL and URL).
+        # If we replace both, string indices shift, leaving behind trailing garbage characters.
         
+        # 1. Sort ascending by start index
+        results = sorted(results, key=lambda x: x.start)
+        non_overlapping = []
+        last_end = 0
+        
+        # 2. Filter out overlaps, keeping the highest confidence match
+        for r in results:
+            if r.start >= last_end:
+                non_overlapping.append(r)
+                last_end = r.end
+                
+        # 3. Sort descending by start index for safe string splicing
+        results = sorted(non_overlapping, key=lambda x: x.start, reverse=True)
+        # ----------------------------------------
+
+        # MASK MODE
         for result in results:
             entity_type = result.entity_type
             sensitive_text = text[result.start:result.end]
@@ -88,7 +104,7 @@ def sanitize_text(text: str) -> str:
             SessionStore.save(placeholder, sensitive_text)
             detected_entities.append(entity_type)
 
-            # Perform replacement manually
+            # Perform replacement safely
             text = text[:result.start] + placeholder + text[result.end:]
 
     if detected_entities:
@@ -98,7 +114,7 @@ def sanitize_text(text: str) -> str:
 
     return text
 
-# --- NEW: Recursive JSON Handling ---
+# --- Recursive JSON Handling ---
 
 def sanitize_tool_arguments(args_str: str) -> str:
     """
@@ -141,7 +157,7 @@ def _recursive_scrub(data):
         # Int, Bool, Float, None - return as is
         return data
 
-# --- NEW: Phase 2 - Inbound Tool Response Scrubbing ---
+# --- Phase 2: Inbound Tool Response Scrubbing ---
 
 def sanitize_tool_response(content: str) -> str:
     """
@@ -164,10 +180,14 @@ def sanitize_tool_response(content: str) -> str:
         return sanitize_text(content)
 
 def desanitize_text(text: str) -> str:
+    """
+    Restores original values for the end-user based on placeholders.
+    """
     if not text:
         return text
             
     import re
+    # Matches <EMAIL_ADDRESS_abc123> or (email_address_abc123)
     candidates = re.findall(r'<[A-Z_]+_[a-z0-9]+>|\([a-z]+_[a-z0-9]+\)', text)
     
     for candidate in candidates:

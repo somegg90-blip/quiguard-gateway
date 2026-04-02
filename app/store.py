@@ -1,31 +1,37 @@
 import time
 
-# Simple in-memory cache with TTL (Time To Live)
-# Structure: { "fake_placeholder": ("real_value", timestamp) }
-_cache = {}
-TTL_SECONDS = 300  # Data expires after 5 minutes
-
 class SessionStore:
-    @staticmethod
-    def save(key: str, value: str):
-        _cache[key] = (value, time.time())
-    
-    @staticmethod
-    def get(key: str) -> str | None:
-        if key not in _cache:
-            return None
-        
-        val, timestamp = _cache[key]
-        # Check if expired
-        if time.time() - timestamp > TTL_SECONDS:
-            del _cache[key]
-            return None
-        return val
+    """
+    In-memory state manager for Round-Trip Restoration.
+    Maps placeholders (<PERSON_123>) to real values for the duration of a session.
+    """
+    _store = {}
+    _ttl_seconds = 3600  # Expire keys after 1 hour to prevent memory bloat
 
-    @staticmethod
-    def cleanup():
-        """Remove expired keys to prevent memory leaks."""
-        current_time = time.time()
-        expired_keys = [k for k, (v, t) in _cache.items() if current_time - t > TTL_SECONDS]
+    @classmethod
+    def save(cls, placeholder: str, real_value: str):
+        cls._store[placeholder] = {
+            "value": real_value,
+            "expires_at": time.time() + cls._ttl_seconds
+        }
+
+    @classmethod
+    def get(cls, placeholder: str) -> str | None:
+        item = cls._store.get(placeholder)
+        if not item:
+            return None
+            
+        # Check if expired
+        if time.time() > item["expires_at"]:
+            del cls._store[placeholder]
+            return None
+            
+        return item["value"]
+
+    @classmethod
+    def cleanup(cls):
+        """Called by main.py background task to clear old keys"""
+        now = time.time()
+        expired_keys = [k for k, v in cls._store.items() if now > v["expires_at"]]
         for k in expired_keys:
-            del _cache[k]
+            del cls._store[k]

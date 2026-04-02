@@ -8,6 +8,7 @@ pydantic-settings
 streamlit
 tiktoken
 pyyaml
+supabase
 
 # --- CRITICAL FIXES ---
 # Pin Spacy to a stable version that works with Pydantic v2
@@ -15,3 +16,6 @@ spacy==3.7.4
 
 # Download the model directly (version matches spacy)
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+
+# --- Phase 3: Secure Ledger (Supabase Integration) ---
+supabase>=2.0.0
