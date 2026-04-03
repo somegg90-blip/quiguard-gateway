@@ -273,20 +273,19 @@ def check_rate_limit(key_info: APIKeyInfo) -> Tuple[bool, str]:
     Returns:
         (allowed: bool, message: str)
     """
-    # Community (self-hosted) = unlimited
-    if key_info.plan == "community":
-        return True, "OK"
-    
     # Enterprise = unlimited
     if key_info.plan == "enterprise":
         return True, "OK"
     
-    # Check monthly limit
+    # Community plan: enforce default limit of 1,000/month
     limit = key_info.monthly_request_limit
     if limit is None:
-        return True, "OK"
+        if key_info.plan == "community":
+            limit = 1000
+        else:
+            return True, "OK"
     
-    count = key_info.monthly_request_count
+    count = key_info.monthly_request_count or 0
     if count >= limit:
         return False, f"Monthly request limit reached ({count}/{limit}). Upgrade your plan at quiguard.ai/pricing"
     

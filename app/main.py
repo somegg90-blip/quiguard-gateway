@@ -57,6 +57,17 @@ def _get_supabase_client():
     except Exception:
         return None
 
+def _increment_request_count(api_key_id: int, user_id: str):
+    """Atomically increment request counters after each successful proxy call."""
+    try:
+        supabase = _get_supabase_client()
+        if supabase is None:
+            return
+        supabase.rpc("increment_api_request_count", {"p_key_id": api_key_id}).execute()
+        supabase.rpc("increment_monthly_request_count", {"p_user_id": user_id}).execute()
+    except Exception as e:
+        print(f"[Stats] Increment error (non-blocking): {e}")
+
 
 @app.get("/health")
 async def health_check():
@@ -475,6 +486,10 @@ async def catch_all(request: Request, path: str):
 
     # 6. Process & Desanitize
     final_body = await process_response(upstream_response, path)
+
+    # 6b. Increment request counter
+    if user_id and key_info.api_key_id:
+        _increment_request_count(key_info.api_key_id, user_id)
 
     # 7. Filter Headers
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding']
