@@ -35,7 +35,6 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    # Cleanup task for expired keys
     async def cleanup_task():
         while True:
             SessionStore.cleanup()
@@ -48,7 +47,6 @@ async def startup_event():
 # ============================================================
 
 def _get_supabase_client():
-    """Get Supabase client for server-side reads."""
     try:
         from supabase import create_client
         supabase_url = os.getenv("SUPABASE_URL", "")
@@ -75,7 +73,8 @@ async def get_audit_logs(
     offset: int = Query(0, ge=0),
     event_type: Optional[str] = Query(None),
     risk_only: bool = Query(False),
-    hours: Optional[int] = Query(None, description="Filter to last N hours"),
+    hours: Optional[int] = Query(None),
+    user_id: Optional[str] = Query(None),
 ):
     supabase = _get_supabase_client()
 
@@ -94,6 +93,9 @@ async def get_audit_logs(
                     if not line.strip():
                         continue
                     entry = json.loads(line)
+
+                    if user_id and entry.get("user_id") != user_id:
+                        continue
 
                     if event_type and entry.get("event") != event_type:
                         continue
@@ -122,6 +124,10 @@ async def get_audit_logs(
             "id, timestamp, event, risk_detected, entities_blocked, sanitized_snippet",
             count="exact"
         )
+
+        # >>> USER ISOLATION: Only return this user's logs <<<
+        if user_id:
+            query = query.eq("user_id", user_id)
 
         if event_type:
             query = query.eq("event", event_type)
@@ -166,6 +172,7 @@ async def get_audit_logs(
 @app.get("/api/audit-stats")
 async def get_audit_stats(
     hours: int = Query(24, ge=1, le=720, description="Stats for the last N hours"),
+    user_id: Optional[str] = Query(None),
 ):
     supabase = _get_supabase_client()
 
@@ -189,6 +196,8 @@ async def get_audit_stats(
                     if not line.strip():
                         continue
                     entry = json.loads(line)
+                    if user_id and entry.get("user_id") != user_id:
+                        continue
                     try:
                         ts = datetime.fromisoformat(entry.get("timestamp", ""))
                         if ts >= cutoff:
@@ -232,24 +241,37 @@ async def get_audit_stats(
     try:
         cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
 
-        total_response = supabase.table("audit_logs").select(
+        # >>> USER ISOLATION on all queries <<<
+        base_query = supabase.table("audit_logs").select(
             "id", count="exact"
-        ).gte("timestamp", cutoff).execute()
+        ).gte("timestamp", cutoff)
+        if user_id:
+            base_query = base_query.eq("user_id", user_id)
+        total_response = base_query.execute()
         total_events = total_response.count if hasattr(total_response, 'count') else len(total_response.data)
 
-        blocked_response = supabase.table("audit_logs").select(
+        blocked_query = supabase.table("audit_logs").select(
             "id", count="exact"
-        ).gte("timestamp", cutoff).eq("event", "request_blocked").execute()
+        ).gte("timestamp", cutoff).eq("event", "request_blocked")
+        if user_id:
+            blocked_query = blocked_query.eq("user_id", user_id)
+        blocked_response = blocked_query.execute()
         blocked = blocked_response.count if hasattr(blocked_response, 'count') else len(blocked_response.data)
 
-        sanitized_response = supabase.table("audit_logs").select(
+        sanitized_query = supabase.table("audit_logs").select(
             "id", count="exact"
-        ).gte("timestamp", cutoff).eq("event", "prompt_sanitized").execute()
+        ).gte("timestamp", cutoff).eq("event", "prompt_sanitized")
+        if user_id:
+            sanitized_query = sanitized_query.eq("user_id", user_id)
+        sanitized_response = sanitized_query.execute()
         sanitized = sanitized_response.count if hasattr(sanitized_response, 'count') else len(sanitized_response.data)
 
-        all_response = supabase.table("audit_logs").select(
+        all_query = supabase.table("audit_logs").select(
             "timestamp, entities_blocked, event"
-        ).gte("timestamp", cutoff).order("timestamp", desc=True).execute()
+        ).gte("timestamp", cutoff).order("timestamp", desc=True)
+        if user_id:
+            all_query = all_query.eq("user_id", user_id)
+        all_response = all_query.execute()
 
         entity_counts = {}
         for row in all_response.data:
@@ -291,7 +313,6 @@ async def get_audit_stats(
 
 @app.get("/api/subscription")
 async def get_subscription(user_id: str):
-    """Returns the subscription info for a user."""
     supabase = _get_supabase_client()
     if supabase is None:
         return JSONResponse(content={"error": "Supabase not configured"}, status_code=500)
@@ -349,7 +370,6 @@ async def delete_key(key_id: int, user_id: str):
 
 @app.get("/api/policy")
 async def get_policy(user_id: str):
-    """Returns the merged policy (default + user overrides) for a user."""
     try:
         merged_policy = settings.load_user_policy(user_id)
         return JSONResponse(content={"policy": merged_policy})
@@ -364,7 +384,6 @@ class SavePolicyRequest(BaseModel):
 
 @app.put("/api/policy")
 async def save_policy(req: SavePolicyRequest):
-    """Saves user's policy overrides (diff from default is computed server-side)."""
     try:
         result = settings.save_user_policy(req.user_id, req.policy)
         return JSONResponse(content=result, status_code=200)
@@ -375,7 +394,6 @@ async def save_policy(req: SavePolicyRequest):
 
 @app.delete("/api/policy")
 async def reset_policy(user_id: str):
-    """Resets user's policy to defaults."""
     try:
         result = settings.reset_user_policy(user_id)
         return JSONResponse(content=result, status_code=200)
@@ -390,14 +408,12 @@ async def reset_policy(user_id: str):
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def catch_all(request: Request, path: str):
-    # 1. Check if this path requires auth
     full_path = f"/{path}"
 
-    # Skip auth for internal API routes (they handle their own auth via Supabase session)
     if full_path.startswith("/api/"):
         return JSONResponse(content={"error": "Not found"}, status_code=404)
 
-    # 2. Validate API Key for proxy traffic
+    # 2. Validate API Key
     api_key = request.headers.get("Authorization", "").replace("Bearer ", "")
     api_key = api_key or request.headers.get("X-QuiGuard-Key", "")
 
