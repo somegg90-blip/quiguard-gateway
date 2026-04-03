@@ -2,12 +2,12 @@ from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from .store import SessionStore
-from .config import settings
+from .config import settings, get_active_policy
 import hashlib
 import json
 
-# Load Policy
-policy = settings.load_policy()
+# Load Default Policy (for startup custom pattern registration)
+_default_policy = settings.load_policy()
 
 # --- Custom Exception for Blocking ---
 class PolicyBlockedException(Exception):
@@ -18,16 +18,38 @@ class PolicyBlockedException(Exception):
 analyzer = AnalyzerEngine(supported_languages=["en"])
 anonymizer = AnonymizerEngine()
 
-# Add Custom Patterns from policy.yaml
-if "custom_patterns" in policy:
-    for p in policy['custom_patterns']:
-        pattern = Pattern(name=p['name'], regex=p['regex'], score=p['score'])
-        recognizer = PatternRecognizer(
-            supported_entity=p['name'], 
-            patterns=[pattern],
-            context=p.get('context', [])
-        )
-        analyzer.registry.add_recognizer(recognizer)
+# Track registered custom patterns to avoid duplicates
+_registered_custom_patterns = set()
+
+
+def _register_custom_patterns(policy: dict):
+    """Register custom patterns from policy. Updates existing patterns if changed."""
+    for p in policy.get("custom_patterns", []):
+        name = p.get("name")
+        if not name:
+            continue
+        try:
+            if name in _registered_custom_patterns:
+                # Remove old recognizer so we can re-register with updated regex
+                try:
+                    analyzer.registry.remove_recognizer(name)
+                except Exception:
+                    pass
+            pattern = Pattern(name=name, regex=p["regex"], score=p["score"])
+            recognizer = PatternRecognizer(
+                supported_entity=name,
+                patterns=[pattern],
+                context=p.get("context", [])
+            )
+            analyzer.registry.add_recognizer(recognizer)
+            _registered_custom_patterns.add(name)
+        except Exception as e:
+            print(f"[Sanitizer] Error registering pattern {name}: {e}")
+
+
+# Register default custom patterns at startup
+_register_custom_patterns(_default_policy)
+
 
 # --- Helper Functions ---
 
@@ -36,12 +58,13 @@ def generate_deterministic_placeholder(entity_type: str, sensitive_text: str) ->
     Generates a unique placeholder based on the content of the sensitive text.
     Ensures "John" -> <PERSON_abc12> and "Jane" -> <PERSON_xyz99>.
     """
+    policy = get_active_policy()
     fmt_config = policy.get('placeholder_format', {})
     mode = fmt_config.get('mode', 'default')
-    
+
     # Use a hash of the sensitive text for uniqueness
     unique_id = hashlib.md5(sensitive_text.encode()).hexdigest()[:6]
-    
+
     if mode == "numeric":
         return f"({entity_type.lower()}_{unique_id[:4]})"
     elif mode == "redacted":
@@ -49,18 +72,55 @@ def generate_deterministic_placeholder(entity_type: str, sensitive_text: str) ->
     else:
         return f"<{entity_type}_{unique_id}>"
 
+
 def sanitize_text(text: str) -> str:
     if not text:
         return text
 
-    policy = settings.load_policy() # Hot reload
-    
+    policy = get_active_policy()
+
+    # Sync any new or updated custom patterns from the active policy
+    _register_custom_patterns(policy)
+
     original_text = text
     detected_entities = []
-    action_mode = policy.get('action_mode', 'mask')
+
+    # Determine action mode (check multiple locations for compatibility)
+    action_mode = (
+        policy.get('action_mode') or
+        policy.get('settings', {}).get('default_action', 'mask')
+    )
+
+    # Get confidence threshold from policy
+    settings_cfg = policy.get('settings', {})
+    confidence_threshold = settings_cfg.get('confidence_threshold', 0.0)
 
     results = analyzer.analyze(text=text, language='en')
-    
+
+    # --- Filter 1: Confidence threshold ---
+    if confidence_threshold > 0:
+        results = [r for r in results if r.score >= confidence_threshold]
+
+    # --- Filter 2: Entity filtering ---
+    # Build set of currently active custom entity names
+    active_custom = set(
+        p.get("name") for p in policy.get("custom_patterns", [])
+        if p.get("name")
+    )
+    enabled_entities = policy.get('pii', {}).get('enabled_entities')
+
+    filtered = []
+    for r in results:
+        if r.entity_type in _registered_custom_patterns:
+            # Custom entity: only include if it's in the active policy
+            if r.entity_type in active_custom:
+                filtered.append(r)
+        else:
+            # Standard entity: filter by enabled_entities (if specified)
+            if enabled_entities is None or r.entity_type in enabled_entities:
+                filtered.append(r)
+    results = filtered
+
     if results:
         if action_mode == "block":
             from app.audit_logger import log_audit_event
@@ -75,36 +135,26 @@ def sanitize_text(text: str) -> str:
             log_audit_event("request_warned", original_text, "", [r.entity_type for r in results])
             return text
 
-        # --- FIX: REMOVE OVERLAPPING ENTITIES ---
-        # Presidio sometimes flags the same text as multiple things (e.g., EMAIL and URL).
-        # If we replace both, string indices shift, leaving behind trailing garbage characters.
-        
-        # 1. Sort ascending by start index
+        # --- REMOVE OVERLAPPING ENTITIES ---
         results = sorted(results, key=lambda x: x.start)
         non_overlapping = []
         last_end = 0
-        
-        # 2. Filter out overlaps, keeping the highest confidence match
         for r in results:
             if r.start >= last_end:
                 non_overlapping.append(r)
                 last_end = r.end
-                
-        # 3. Sort descending by start index for safe string splicing
         results = sorted(non_overlapping, key=lambda x: x.start, reverse=True)
-        # ----------------------------------------
 
         # MASK MODE
         for result in results:
             entity_type = result.entity_type
             sensitive_text = text[result.start:result.end]
-            
+
             placeholder = generate_deterministic_placeholder(entity_type, sensitive_text)
-            
+
             SessionStore.save(placeholder, sensitive_text)
             detected_entities.append(entity_type)
 
-            # Perform replacement safely
             text = text[:result.start] + placeholder + text[result.end:]
 
     if detected_entities:
@@ -122,17 +172,10 @@ def sanitize_tool_arguments(args_str: str) -> str:
     Handles nested structures and stringified JSON.
     """
     try:
-        # 1. Parse the JSON string into a Python dict
         args_dict = json.loads(args_str)
-        
-        # 2. Recursively scrub values in the dict
         scrubbed_dict = _recursive_scrub(args_dict)
-        
-        # 3. Convert back to string
         return json.dumps(scrubbed_dict)
-        
     except json.JSONDecodeError:
-        # Fallback: If it's not valid JSON, treat as raw text
         return sanitize_text(args_str)
 
 def _recursive_scrub(data):
@@ -144,17 +187,13 @@ def _recursive_scrub(data):
     elif isinstance(data, list):
         return [_recursive_scrub(item) for item in data]
     elif isinstance(data, str):
-        # It's a string. Is it stringified JSON? Try to parse.
         try:
             nested_data = json.loads(data)
-            # It was JSON! Scrub it recursively.
             scrubbed_nested = _recursive_scrub(nested_data)
             return json.dumps(scrubbed_nested)
         except json.JSONDecodeError:
-            # Not JSON, just a normal string. Scrub PII.
             return sanitize_text(data)
     else:
-        # Int, Bool, Float, None - return as is
         return data
 
 # --- Phase 2: Inbound Tool Response Scrubbing ---
@@ -166,17 +205,14 @@ def sanitize_tool_response(content: str) -> str:
     """
     if not content:
         return content
-    
+
     print("[QuiGuard] Sanitizing Inbound Tool Response...")
-    
-    # Tool responses are often stringified JSON or plain text.
-    # We use the same recursive logic as arguments.
+
     try:
         data = json.loads(content)
         scrubbed_data = _recursive_scrub(data)
         return json.dumps(scrubbed_data)
     except json.JSONDecodeError:
-        # Not JSON, just treat as text
         return sanitize_text(content)
 
 def desanitize_text(text: str) -> str:
@@ -185,14 +221,13 @@ def desanitize_text(text: str) -> str:
     """
     if not text:
         return text
-            
+
     import re
-    # Matches <EMAIL_ADDRESS_abc123> or (email_address_abc123)
     candidates = re.findall(r'<[A-Z_]+_[a-z0-9]+>|\([a-z]+_[a-z0-9]+\)', text)
-    
+
     for candidate in candidates:
         real_value = SessionStore.get(candidate)
         if real_value:
             text = text.replace(candidate, real_value)
-            
+
     return text
