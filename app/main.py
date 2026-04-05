@@ -14,6 +14,8 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 from pydantic import BaseModel
+from app.config import settings, set_request_policy
+from app.sanitizer import set_current_user_id
 
 app = FastAPI(
     title="QuiGuard API",
@@ -445,6 +447,7 @@ async def catch_all(request: Request, path: str):
     # Load user-specific policy for this request
     user_id = key_info.get('user_id') if isinstance(key_info, dict) else getattr(key_info, 'user_id', None)
     if user_id:
+        set_current_user_id(user_id)
         try:
             user_policy = settings.load_user_policy(user_id)
             set_request_policy(user_policy)

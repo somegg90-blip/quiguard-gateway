@@ -5,6 +5,13 @@ from .store import SessionStore
 from .config import settings, get_active_policy
 import hashlib
 import json
+from contextvars import ContextVar
+
+# Per-request user_id for audit logging (async-safe)
+_current_user_id_var: ContextVar[str | None] = ContextVar("_current_user_id_var", default=None)
+
+def set_current_user_id(uid: str):
+    _current_user_id_var.set(uid)
 
 # Load Default Policy (for startup custom pattern registration)
 _default_policy = settings.load_policy()
@@ -124,7 +131,7 @@ def sanitize_text(text: str) -> str:
     if results:
         if action_mode == "block":
             from app.audit_logger import log_audit_event
-            log_audit_event("request_blocked", original_text, "", [r.entity_type for r in results])
+            log_audit_event("request_blocked", original_text, "", [r.entity_type for r in results], user_id=_current_user_id_var.get())
             raise PolicyBlockedException(
                 f"Security Policy Violation: Blocked {len(results)} sensitive items."
             )
@@ -132,7 +139,7 @@ def sanitize_text(text: str) -> str:
         if action_mode == "warn":
             print(f"[QuiGuard WARNING] Detected {len(results)} items but allowing passage.")
             from app.audit_logger import log_audit_event
-            log_audit_event("request_warned", original_text, "", [r.entity_type for r in results])
+            log_audit_event("request_warned", original_text, "", [r.entity_type for r in results], user_id=_current_user_id_var.get())
             return text
 
         # --- REMOVE OVERLAPPING ENTITIES ---
@@ -160,7 +167,7 @@ def sanitize_text(text: str) -> str:
     if detected_entities:
         print(f"[QuiGuard] Scrubbed {len(detected_entities)} items: {list(set(detected_entities))}")
         from app.audit_logger import log_audit_event
-        log_audit_event("prompt_sanitized", original_text, text, detected_entities)
+        log_audit_event("prompt_sanitized", original_text, text, detected_entities, user_id=_current_user_id_var.get())
 
     return text
 
